@@ -52,7 +52,7 @@ function DisruptionItem({ disruption }: { disruption: Disruption }) {
 }
 
 export function DisruptionPanel() {
-  const { disruptions, connected, lastUpdate } = useDisruptionUpdates();
+  const { disruptions, connected, lastUpdate, availability } = useDisruptionUpdates();
 
   return (
     <div className="bg-white rounded-xl shadow-sm p-4">
@@ -76,6 +76,16 @@ export function DisruptionPanel() {
       {lastUpdate && (
         <div className="text-xs text-gray-400 mb-3">
           Updated {format(lastUpdate, 'HH:mm:ss')}
+        </div>
+      )}
+
+      {/* Show warning if SIRI-SX data is unavailable */}
+      {!availability.siri_sx && (
+        <div className="mb-3 p-2 bg-amber-50 border border-amber-200 rounded-lg">
+          <div className="flex items-center gap-2 text-amber-800 text-sm">
+            <AlertCircle className="w-4 h-4" />
+            <span>Live disruption data unavailable</span>
+          </div>
         </div>
       )}
 

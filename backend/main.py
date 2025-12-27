@@ -9,14 +9,15 @@ Production-grade Swiss public transport web app combining:
 """
 import asyncio
 import logging
+import os
 from datetime import datetime
 from typing import List, Optional, AsyncGenerator
 from contextlib import asynccontextmanager
 import json
+import zoneinfo
 
-from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
 from sse_starlette.sse import EventSourceResponse
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pydantic import BaseModel
@@ -31,9 +32,16 @@ from ojp_client import search_locations, search_trips
 from realtime_client import (
     fetch_siri_sx_disruptions,
     fetch_gtfs_rt_delays,
-    get_disruptions_for_route
+    get_disruptions_for_route,
+    is_siri_sx_available,
+    is_gtfs_rt_available
 )
-from traffic_client import fetch_traffic_situations, fetch_traffic_lights
+from traffic_client import (
+    fetch_traffic_situations,
+    fetch_traffic_lights,
+    is_traffic_situations_available,
+    is_traffic_lights_available
+)
 from prediction_engine import predict_delays_for_trip
 
 # Configure logging
@@ -45,41 +53,50 @@ logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
+# Timezone
+try:
+    TIMEZONE = zoneinfo.ZoneInfo(settings.TIMEZONE)
+except Exception:
+    TIMEZONE = zoneinfo.ZoneInfo("Europe/Zurich")
+
 # Background scheduler for data refresh
-scheduler = AsyncIOScheduler()
+scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 
 # In-memory store for latest data (for SSE broadcasting)
 _latest_disruptions: List[Disruption] = []
-_latest_traffic = {}
+_disruptions_available: bool = False
+_latest_traffic_available: bool = False
 _subscribers: List[asyncio.Queue] = []
 
 
 async def refresh_disruptions():
     """Background task to refresh disruption data."""
-    global _latest_disruptions
+    global _latest_disruptions, _disruptions_available
     try:
-        _latest_disruptions = await fetch_siri_sx_disruptions()
+        disruptions, available = await fetch_siri_sx_disruptions()
+        _latest_disruptions = disruptions
+        _disruptions_available = available
         await broadcast_event("disruptions_update", {
             "count": len(_latest_disruptions),
-            "disruptions": [d.model_dump() for d in _latest_disruptions[:20]]
+            "available": _disruptions_available,
+            "disruptions": [d.model_dump(mode='json') for d in _latest_disruptions[:20]]
         })
-        logger.info(f"Refreshed disruptions: {len(_latest_disruptions)} active")
+        logger.info(f"Refreshed disruptions: {len(_latest_disruptions)} active, available={_disruptions_available}")
     except Exception as e:
         logger.error(f"Error refreshing disruptions: {e}")
+        _disruptions_available = False
 
 
 async def refresh_traffic():
     """Background task to refresh traffic data."""
-    global _latest_traffic
+    global _latest_traffic_available
     try:
-        situations = await fetch_traffic_situations()
-        _latest_traffic = {
-            "situations_count": len(situations),
-            "last_update": datetime.utcnow().isoformat()
-        }
-        logger.info(f"Refreshed traffic: {len(situations)} situations")
+        situations, available = await fetch_traffic_situations()
+        _latest_traffic_available = available
+        logger.info(f"Refreshed traffic: {len(situations)} situations, available={_latest_traffic_available}")
     except Exception as e:
         logger.error(f"Error refreshing traffic: {e}")
+        _latest_traffic_available = False
 
 
 async def broadcast_event(event_type: str, data: dict):
@@ -87,7 +104,7 @@ async def broadcast_event(event_type: str, data: dict):
     event = SSEEvent(
         event_type=event_type,
         data=data,
-        timestamp=datetime.utcnow()
+        timestamp=datetime.now(TIMEZONE)
     )
     dead_queues = []
     for queue in _subscribers:
@@ -97,13 +114,13 @@ async def broadcast_event(event_type: str, data: dict):
             dead_queues.append(queue)
 
     for q in dead_queues:
-        _subscribers.remove(q)
+        if q in _subscribers:
+            _subscribers.remove(q)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager."""
-    # Start background scheduler
     scheduler.add_job(
         refresh_disruptions,
         'interval',
@@ -122,15 +139,13 @@ async def lifespan(app: FastAPI):
     await refresh_disruptions()
     await refresh_traffic()
 
-    logger.info("Swiss Transport Planner started")
+    logger.info(f"Swiss Transport Planner started on port {settings.PORT}")
     yield
 
-    # Cleanup
     scheduler.shutdown()
     logger.info("Swiss Transport Planner stopped")
 
 
-# Create FastAPI app
 app = FastAPI(
     title=settings.APP_NAME,
     description="Swiss public transport planner with real-time updates and delay prediction",
@@ -138,7 +153,6 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS.split(","),
@@ -148,37 +162,37 @@ app.add_middleware(
 )
 
 
-# Health check
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
     return {
         "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(TIMEZONE).isoformat(),
+        "timezone": settings.TIMEZONE,
         "disruptions_count": len(_latest_disruptions),
-        "api_configured": bool(settings.OTD_API_KEY)
+        "data_availability": {
+            "ojp": bool(settings.OTD_OJP_API_KEY),
+            "gtfs_rt": is_gtfs_rt_available(),
+            "siri_sx": is_siri_sx_available(),
+            "traffic_situations": is_traffic_situations_available(),
+            "traffic_lights": is_traffic_lights_available()
+        }
     }
 
 
-# Location search
 @app.get("/api/locations", response_model=List[Location])
 async def api_search_locations(
     query: str = Query(..., min_length=2, description="Search query"),
     limit: int = Query(10, ge=1, le=50, description="Max results")
 ):
-    """
-    Search for locations (stops, stations) by name.
-
-    Returns matching stops from the Swiss public transport network.
-    """
-    if not settings.OTD_API_KEY:
-        raise HTTPException(status_code=503, detail="API key not configured")
+    """Search for locations (stops, stations) by name."""
+    if not settings.OTD_OJP_API_KEY:
+        raise HTTPException(status_code=503, detail="OJP API key not configured")
 
     locations = await search_locations(query, limit)
     return locations
 
 
-# Trip planning
 class TripPlanRequest(BaseModel):
     """Request body for trip planning."""
     origin_id: str
@@ -194,14 +208,10 @@ class TripPlanRequest(BaseModel):
 async def api_plan_trip(request: TripPlanRequest):
     """
     Plan a trip between two locations.
-
-    Uses OJP for timetable-based routing. Does NOT include real-time
-    data in routing - real-time is only used for display/monitoring.
-
-    Optionally includes delay predictions for bus/tram legs.
+    Uses OJP for timetable-based routing. Real-time is only used for display/monitoring.
     """
-    if not settings.OTD_API_KEY:
-        raise HTTPException(status_code=503, detail="API key not configured")
+    if not settings.OTD_OJP_API_KEY:
+        raise HTTPException(status_code=503, detail="OJP API key not configured")
 
     result = await search_trips(
         origin_id=request.origin_id,
@@ -210,7 +220,6 @@ async def api_plan_trip(request: TripPlanRequest):
         num_results=request.num_results
     )
 
-    # Add delay predictions if requested
     if request.include_predictions:
         for trip in result.trips:
             predictions = await predict_delays_for_trip(trip.legs)
@@ -218,7 +227,6 @@ async def api_plan_trip(request: TripPlanRequest):
                 if prediction:
                     trip.legs[leg_idx].delay_prediction = prediction
 
-            # Check for disruptions affecting this trip
             stop_ids = []
             line_refs = []
             for leg in trip.legs:
@@ -232,21 +240,14 @@ async def api_plan_trip(request: TripPlanRequest):
             disruptions = await get_disruptions_for_route(stop_ids, line_refs)
             if disruptions:
                 trip.has_disruptions = True
-                trip.disruptions = disruptions[:5]  # Limit to 5
+                trip.disruptions = disruptions[:5]
 
     return result
 
 
-# Get trip details with predictions
 @app.get("/api/trips/{trip_id}/predictions")
 async def api_get_trip_predictions(trip_id: str):
-    """
-    Get delay predictions for a specific trip.
-
-    Note: This endpoint requires the trip to be fetched first via /api/trips.
-    In a production system, trips would be cached/stored.
-    """
-    # For demo purposes, return explanation
+    """Get delay predictions for a specific trip."""
     return {
         "message": "Use POST /api/trips with include_predictions=true",
         "prediction_factors": [
@@ -259,17 +260,16 @@ async def api_get_trip_predictions(trip_id: str):
     }
 
 
-# Disruptions
-@app.get("/api/disruptions", response_model=List[Disruption])
+@app.get("/api/disruptions")
 async def api_get_disruptions(
     limit: int = Query(50, ge=1, le=200)
 ):
-    """
-    Get current disruptions affecting Swiss public transport.
-
-    Data is refreshed every 30 seconds from SIRI-SX.
-    """
-    return _latest_disruptions[:limit]
+    """Get current disruptions affecting Swiss public transport."""
+    return {
+        "available": _disruptions_available,
+        "count": len(_latest_disruptions),
+        "disruptions": [d.model_dump(mode='json') for d in _latest_disruptions[:limit]]
+    }
 
 
 @app.get("/api/disruptions/for-route")
@@ -277,96 +277,95 @@ async def api_get_disruptions_for_route(
     stop_ids: str = Query(..., description="Comma-separated stop IDs"),
     line_refs: str = Query("", description="Comma-separated line references")
 ):
-    """
-    Get disruptions affecting specific stops or lines.
-    """
+    """Get disruptions affecting specific stops or lines."""
     stops = [s.strip() for s in stop_ids.split(",") if s.strip()]
     lines = [l.strip() for l in line_refs.split(",") if l.strip()]
 
     disruptions = await get_disruptions_for_route(stops, lines)
-    return disruptions
+    return {
+        "available": _disruptions_available,
+        "disruptions": disruptions
+    }
 
 
-# Traffic data
 @app.get("/api/traffic/situations")
 async def api_get_traffic_situations(
     limit: int = Query(50, ge=1, le=200)
 ):
-    """
-    Get current road traffic situations.
-
-    Includes accidents, roadworks, and other incidents that may
-    affect bus/tram services.
-    """
-    situations = await fetch_traffic_situations()
-    return situations[:limit]
+    """Get current road traffic situations."""
+    situations, available = await fetch_traffic_situations()
+    return {
+        "available": available,
+        "count": len(situations),
+        "situations": situations[:limit]
+    }
 
 
 @app.get("/api/traffic/lights")
 async def api_get_traffic_lights(
     area_id: Optional[str] = Query(None, description="Filter by area ID")
 ):
-    """
-    Get traffic light status data.
+    """Get traffic light status data."""
+    lights, available = await fetch_traffic_lights(area_id)
+    return {
+        "available": available,
+        "count": len(lights),
+        "lights": lights
+    }
 
-    Includes Level of Service, queue lengths, and green percentages.
-    """
-    lights = await fetch_traffic_lights(area_id)
-    return lights
 
-
-# Server-Sent Events for real-time updates
 @app.get("/api/events")
 async def api_sse_events():
     """
     Server-Sent Events endpoint for real-time updates.
-
-    Streams:
-    - disruptions_update: When disruption data is refreshed
-    - delay_update: When delay information changes
-
-    Connect using EventSource in browser:
-    ```javascript
-    const evtSource = new EventSource('/api/events');
-    evtSource.onmessage = (event) => console.log(event.data);
-    ```
+    Heartbeat every ~25 seconds.
     """
     async def event_generator() -> AsyncGenerator:
-        queue: asyncio.Queue = asyncio.Queue(maxsize=100)
+        queue: asyncio.Queue = asyncio.Queue(maxsize=50)
         _subscribers.append(queue)
 
         try:
-            # Send initial data
             yield {
                 "event": "connected",
                 "data": json.dumps({
                     "message": "Connected to Swiss Transport Planner",
-                    "timestamp": datetime.utcnow().isoformat()
+                    "timestamp": datetime.now(TIMEZONE).isoformat(),
+                    "data_available": {
+                        "disruptions": _disruptions_available,
+                        "traffic": _latest_traffic_available
+                    }
                 })
             }
 
-            # Send current disruptions
             yield {
                 "event": "disruptions_update",
                 "data": json.dumps({
                     "count": len(_latest_disruptions),
+                    "available": _disruptions_available,
                     "disruptions": [d.model_dump(mode='json') for d in _latest_disruptions[:20]]
                 })
             }
 
-            # Stream updates
             while True:
                 try:
-                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    event = await asyncio.wait_for(
+                        queue.get(),
+                        timeout=settings.SSE_HEARTBEAT_INTERVAL
+                    )
                     yield {
                         "event": event.event_type,
                         "data": json.dumps(event.data, default=str)
                     }
                 except asyncio.TimeoutError:
-                    # Send keepalive
                     yield {
-                        "event": "keepalive",
-                        "data": json.dumps({"timestamp": datetime.utcnow().isoformat()})
+                        "event": "heartbeat",
+                        "data": json.dumps({
+                            "timestamp": datetime.now(TIMEZONE).isoformat(),
+                            "data_available": {
+                                "disruptions": _disruptions_available,
+                                "traffic": _latest_traffic_available
+                            }
+                        })
                     }
 
         finally:
@@ -376,30 +375,22 @@ async def api_sse_events():
     return EventSourceResponse(event_generator())
 
 
-# SSE endpoint for specific trip monitoring
 @app.get("/api/trips/{trip_id}/monitor")
 async def api_monitor_trip(trip_id: str):
-    """
-    Monitor a specific trip for real-time updates.
-
-    Streams disruptions and delay updates relevant to the trip.
-    """
-    # For demo - in production, would track specific trip
+    """Monitor a specific trip for real-time updates."""
     return {
         "message": "Use /api/events for general updates",
         "note": "Trip-specific monitoring requires trip data from /api/trips"
     }
 
 
-# Documentation
 @app.get("/api/info")
 async def api_info():
-    """
-    API information and assumptions.
-    """
+    """API information and assumptions."""
     return {
         "name": settings.APP_NAME,
         "version": "1.0.0",
+        "timezone": settings.TIMEZONE,
         "data_sources": {
             "routing": "OJP (Open Journey Planner) - timetable only",
             "disruptions": "SIRI-SX / VDV736 - refreshed every 30 seconds",
@@ -407,13 +398,21 @@ async def api_info():
             "traffic_situations": "DATEX II - road incidents",
             "traffic_lights": "OCIT-C - Level of Service, queue lengths"
         },
+        "data_availability": {
+            "ojp": bool(settings.OTD_OJP_API_KEY),
+            "gtfs_rt": is_gtfs_rt_available(),
+            "siri_sx": is_siri_sx_available(),
+            "traffic_situations": is_traffic_situations_available(),
+            "traffic_lights": is_traffic_lights_available()
+        },
         "assumptions": [
             "OJP routing is timetable-only; real-time used for display only",
             "GTFS-RT on OTD does NOT provide vehicle positions, only delays",
             "Delay predictions use heuristic rules based on traffic data",
             "Prediction horizon is 15 minutes, primarily for peak hours",
-            "Peak hours: 5:45-7:00 and 16:30-18:00 local time",
-            "Traffic data coverage varies by region"
+            "Peak hours: 5:45-7:00 and 16:30-18:00 Europe/Zurich",
+            "Traffic data coverage varies by region",
+            "Platform/track info from OJP; fallback gracefully if missing"
         ],
         "prediction_rules": {
             "traffic_situation_severe": "+8 min",
@@ -429,4 +428,8 @@ async def api_info():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        app,
+        host=settings.HOST,
+        port=settings.PORT
+    )

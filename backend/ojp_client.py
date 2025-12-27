@@ -98,13 +98,16 @@ def _build_trip_request(
 
 async def _make_ojp_request(xml_body: str) -> etree._Element:
     """Make request to OJP API."""
+    if not settings.OTD_OJP_API_KEY:
+        raise ValueError("OTD_OJP_API_KEY not configured")
+
     headers = {
         'Content-Type': 'application/xml',
-        'Authorization': f'Bearer {settings.OTD_API_KEY}',
+        'Authorization': f'Bearer {settings.OTD_OJP_API_KEY}',
         'User-Agent': 'SwissTransportApp/1.0'
     }
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=settings.HTTP_TIMEOUT) as client:
         response = await client.post(
             settings.OJP_ENDPOINT,
             content=xml_body,
