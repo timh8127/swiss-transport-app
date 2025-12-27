@@ -11,9 +11,17 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - OTD_API_KEY=${OTD_API_KEY}
+      # Separate API keys for each OTD service
+      - OTD_OJP_API_KEY=${OTD_OJP_API_KEY}
+      - OTD_GTFSRT_API_KEY=${OTD_GTFSRT_API_KEY}
+      - OTD_SIRI_SX_API_KEY=${OTD_SIRI_SX_API_KEY}
+      - OTD_TRAFFIC_SITUATIONS_API_KEY=${OTD_TRAFFIC_SITUATIONS_API_KEY}
+      - OTD_TRAFFIC_LIGHTS_API_KEY=${OTD_TRAFFIC_LIGHTS_API_KEY}
+      # Server settings
+      - PORT=8000
       - DEBUG=true
       - CORS_ORIGINS=http://localhost:3000,http://localhost:80
+      - TIMEZONE=Europe/Zurich
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s

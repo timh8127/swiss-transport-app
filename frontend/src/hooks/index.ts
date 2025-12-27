@@ -51,11 +51,25 @@ export function useLocationSearch() {
   return { query, setQuery, results, loading, error, clearResults: () => setResults([]) };
 }
 
-// Real-time disruption updates hook
+// Data availability status
+interface DataAvailability {
+  gtfs_rt: boolean;
+  siri_sx: boolean;
+  traffic_situations: boolean;
+  traffic_lights: boolean;
+}
+
+// Real-time disruption updates hook with heartbeat handling
 export function useDisruptionUpdates() {
   const [disruptions, setDisruptions] = useState<Disruption[]>([]);
   const [connected, setConnected] = useState(false);
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
+  const [availability, setAvailability] = useState<DataAvailability>({
+    gtfs_rt: true,
+    siri_sx: true,
+    traffic_situations: true,
+    traffic_lights: true,
+  });
   const eventSourceRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
@@ -63,9 +77,24 @@ export function useDisruptionUpdates() {
       try {
         const data = JSON.parse(event.data);
 
+        // Handle heartbeat events (keep-alive)
+        if (data.type === 'heartbeat') {
+          // Heartbeat received, connection is alive
+          return;
+        }
+
+        // Handle disruption updates
         if (data.disruptions) {
           setDisruptions(data.disruptions);
           setLastUpdate(new Date());
+        }
+
+        // Handle availability status updates
+        if (data.available !== undefined) {
+          setAvailability(prev => ({
+            ...prev,
+            siri_sx: data.available,
+          }));
         }
       } catch (err) {
         console.error('Error parsing SSE message:', err);
@@ -89,5 +118,5 @@ export function useDisruptionUpdates() {
     };
   }, []);
 
-  return { disruptions, connected, lastUpdate };
+  return { disruptions, connected, lastUpdate, availability };
 }

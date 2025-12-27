@@ -1,7 +1,7 @@
 """Traffic data client for delay prediction."""
 import httpx
 from datetime import datetime
-from typing import List, Dict, Optional, Tuple
+from typing import List, Optional, Tuple
 from lxml import etree
 import logging
 import math
@@ -13,9 +13,23 @@ from models import TrafficSituation, TrafficLightStatus
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-# Cache for traffic data
-_traffic_situations_cache: TTLCache = TTLCache(maxsize=1, ttl=settings.CACHE_TTL_TRAFFIC)
+# Cache for traffic data with DATEX II specific TTL
+_traffic_situations_cache: TTLCache = TTLCache(maxsize=1, ttl=settings.CACHE_TTL_DATEX)
 _traffic_lights_cache: TTLCache = TTLCache(maxsize=100, ttl=settings.CACHE_TTL_TRAFFIC)
+
+# Availability tracking
+_traffic_situations_available: bool = True
+_traffic_lights_available: bool = True
+
+
+def is_traffic_situations_available() -> bool:
+    """Check if traffic situations data is available."""
+    return _traffic_situations_available and bool(settings.OTD_TRAFFIC_SITUATIONS_API_KEY)
+
+
+def is_traffic_lights_available() -> bool:
+    """Check if traffic lights data is available."""
+    return _traffic_lights_available and bool(settings.OTD_TRAFFIC_LIGHTS_API_KEY)
 
 
 def _build_traffic_situations_request() -> str:
@@ -40,13 +54,24 @@ def _build_traffic_situations_request() -> str:
 </s:Envelope>'''
 
 
-async def fetch_traffic_situations() -> List[TrafficSituation]:
-    """Fetch current traffic situations (accidents, roadworks, etc.)."""
+async def fetch_traffic_situations() -> Tuple[List[TrafficSituation], bool]:
+    """
+    Fetch current traffic situations (accidents, roadworks, etc.).
+    Returns tuple of (situations_list, is_available).
+    DATEX II failures do NOT crash the app - they lower prediction confidence.
+    """
+    global _traffic_situations_available
+
     if 'situations' in _traffic_situations_cache:
-        return _traffic_situations_cache['situations']
+        return _traffic_situations_cache['situations'], _traffic_situations_available
+
+    if not settings.OTD_TRAFFIC_SITUATIONS_API_KEY:
+        logger.warning("OTD_TRAFFIC_SITUATIONS_API_KEY not configured")
+        _traffic_situations_available = False
+        return [], False
 
     headers = {
-        'Authorization': f'Bearer {settings.OTD_API_KEY}',
+        'Authorization': f'Bearer {settings.OTD_TRAFFIC_SITUATIONS_API_KEY}',
         'Content-Type': 'application/xml',
         'SOAPAction': 'http://opentransportdata.swiss/TDP/Soap_Datex2/Pull/v1/pullTrafficMessages',
         'User-Agent': 'SwissTransportApp/1.0'
@@ -55,7 +80,8 @@ async def fetch_traffic_situations() -> List[TrafficSituation]:
     situations = []
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        # Use SOAP_TIMEOUT (3-5s) for DATEX II requests
+        async with httpx.AsyncClient(timeout=settings.SOAP_TIMEOUT) as client:
             response = await client.post(
                 settings.TRAFFIC_SITUATIONS_ENDPOINT,
                 content=_build_traffic_situations_request(),
@@ -65,12 +91,10 @@ async def fetch_traffic_situations() -> List[TrafficSituation]:
 
             root = etree.fromstring(response.content)
 
-            # Parse DATEX II situations - use local-name() to handle namespaces
             for situation in root.xpath('//*[local-name()="situationRecord"]'):
                 try:
                     sit_id = situation.get('id', '')
 
-                    # Get description
                     description = ""
                     for value in situation.xpath('.//*[local-name()="generalPublicComment"]//*[local-name()="value"]'):
                         lang = value.get('lang', '')
@@ -79,7 +103,6 @@ async def fetch_traffic_situations() -> List[TrafficSituation]:
                             if lang == 'en':
                                 break
 
-                    # Get coordinates
                     lat = None
                     lon = None
                     lat_elem = situation.xpath('.//*[local-name()="latitude"]')
@@ -88,16 +111,14 @@ async def fetch_traffic_situations() -> List[TrafficSituation]:
                         try:
                             lat = float(lat_elem[0].text)
                             lon = float(lon_elem[0].text)
-                        except:
+                        except (ValueError, TypeError):
                             pass
 
-                    # Get severity/impact
                     severity = "normal"
                     impact = situation.xpath('.//*[local-name()="impactType"]')
                     if impact:
                         severity = impact[0].text or "normal"
 
-                    # Get times
                     start_time = None
                     end_time = None
                     start_elem = situation.xpath('.//*[local-name()="overallStartTime"]')
@@ -105,12 +126,12 @@ async def fetch_traffic_situations() -> List[TrafficSituation]:
                     if start_elem:
                         try:
                             start_time = datetime.fromisoformat(start_elem[0].text.replace('Z', '+00:00'))
-                        except:
+                        except (ValueError, TypeError):
                             pass
                     if end_elem:
                         try:
                             end_time = datetime.fromisoformat(end_elem[0].text.replace('Z', '+00:00'))
-                        except:
+                        except (ValueError, TypeError):
                             pass
 
                     if sit_id:
@@ -130,21 +151,40 @@ async def fetch_traffic_situations() -> List[TrafficSituation]:
                     continue
 
         _traffic_situations_cache['situations'] = situations
+        _traffic_situations_available = True
 
+    except httpx.TimeoutException:
+        logger.warning("DATEX II traffic situations request timed out")
+        _traffic_situations_available = False
+    except httpx.HTTPStatusError as e:
+        logger.error(f"DATEX II HTTP error: {e.response.status_code}")
+        _traffic_situations_available = False
     except Exception as e:
         logger.error(f"Error fetching traffic situations: {e}")
+        _traffic_situations_available = False
 
-    return situations
+    return situations, _traffic_situations_available
 
 
-async def fetch_traffic_lights(area_id: Optional[str] = None) -> List[TrafficLightStatus]:
-    """Fetch traffic light status data."""
+async def fetch_traffic_lights(area_id: Optional[str] = None) -> Tuple[List[TrafficLightStatus], bool]:
+    """
+    Fetch traffic light status data.
+    Returns tuple of (lights_list, is_available).
+    Failures do NOT crash the app.
+    """
+    global _traffic_lights_available
+
     cache_key = f'lights_{area_id or "all"}'
     if cache_key in _traffic_lights_cache:
-        return _traffic_lights_cache[cache_key]
+        return _traffic_lights_cache[cache_key], _traffic_lights_available
+
+    if not settings.OTD_TRAFFIC_LIGHTS_API_KEY:
+        logger.warning("OTD_TRAFFIC_LIGHTS_API_KEY not configured")
+        _traffic_lights_available = False
+        return [], False
 
     headers = {
-        'Authorization': f'Bearer {settings.OTD_API_KEY}',
+        'Authorization': f'Bearer {settings.OTD_TRAFFIC_LIGHTS_API_KEY}',
         'User-Agent': 'SwissTransportApp/1.0',
         'Accept': 'application/json'
     }
@@ -152,38 +192,34 @@ async def fetch_traffic_lights(area_id: Optional[str] = None) -> List[TrafficLig
     lights = []
 
     try:
-        # First get areas
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=settings.SOAP_TIMEOUT) as client:
             if area_id:
-                # Get snippets for specific area
                 url = f"{settings.TRAFFIC_LIGHTS_BASE}/snippets/{area_id}"
             else:
-                # Get all areas first
                 areas_response = await client.get(
                     f"{settings.TRAFFIC_LIGHTS_BASE}/areas",
                     headers=headers
                 )
                 if areas_response.status_code == 200:
                     areas_data = areas_response.json()
-                    # Return early if we need all - for now just get first area
                     if isinstance(areas_data, list) and len(areas_data) > 0:
                         area_id = areas_data[0].get('areaId', areas_data[0].get('id'))
                         if area_id:
                             url = f"{settings.TRAFFIC_LIGHTS_BASE}/snippets/{area_id}"
                         else:
-                            return lights
+                            _traffic_lights_available = False
+                            return [], False
                     else:
-                        return lights
+                        _traffic_lights_available = False
+                        return [], False
                 else:
-                    return lights
+                    _traffic_lights_available = False
+                    return [], False
 
-            # Get snippets (real-time data)
             response = await client.get(url, headers=headers)
 
             if response.status_code == 200:
                 data = response.json()
-
-                # Parse snippets - structure depends on API response
                 snippets = data if isinstance(data, list) else data.get('snippets', [])
 
                 for snippet in snippets:
@@ -191,7 +227,6 @@ async def fetch_traffic_lights(area_id: Optional[str] = None) -> List[TrafficLig
                         intersection_id = snippet.get('unitId', snippet.get('intersectionId', ''))
                         measurements = snippet.get('measurements', {})
 
-                        # Get Level of Service
                         los = None
                         los_data = measurements.get('LOS', measurements.get('levelOfService'))
                         if los_data:
@@ -200,25 +235,28 @@ async def fetch_traffic_lights(area_id: Optional[str] = None) -> List[TrafficLig
                             else:
                                 los = str(los_data)
 
-                        # Get spillback length
                         spillback = None
                         spillback_data = measurements.get('SpillbackLength', measurements.get('spillbackLength'))
                         if spillback_data:
                             if isinstance(spillback_data, dict):
                                 spillback = spillback_data.get('Length', spillback_data.get('length'))
                             else:
-                                spillback = float(spillback_data) if spillback_data else None
+                                try:
+                                    spillback = float(spillback_data)
+                                except (ValueError, TypeError):
+                                    pass
 
-                        # Get green percentage
                         green_pct = None
                         green_data = measurements.get('GreenPercentage', measurements.get('greenPercentage'))
                         if green_data:
                             if isinstance(green_data, dict):
                                 green_pct = green_data.get('Percentage', green_data.get('percentage'))
                             else:
-                                green_pct = float(green_data) if green_data else None
+                                try:
+                                    green_pct = float(green_data)
+                                except (ValueError, TypeError):
+                                    pass
 
-                        # Get coordinates from intersection info if available
                         lat = snippet.get('latitude')
                         lon = snippet.get('longitude')
 
@@ -239,16 +277,24 @@ async def fetch_traffic_lights(area_id: Optional[str] = None) -> List[TrafficLig
                         continue
 
         _traffic_lights_cache[cache_key] = lights
+        _traffic_lights_available = True
 
+    except httpx.TimeoutException:
+        logger.warning("Traffic lights request timed out")
+        _traffic_lights_available = False
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Traffic lights HTTP error: {e.response.status_code}")
+        _traffic_lights_available = False
     except Exception as e:
         logger.error(f"Error fetching traffic lights: {e}")
+        _traffic_lights_available = False
 
-    return lights
+    return lights, _traffic_lights_available
 
 
 def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Calculate distance between two points in kilometers."""
-    R = 6371  # Earth's radius in km
+    R = 6371
 
     lat1_rad = math.radians(lat1)
     lat2_rad = math.radians(lat2)
@@ -265,10 +311,15 @@ def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> fl
 async def get_traffic_near_route(
     route_points: List[Tuple[float, float]],
     radius_km: float = 0.5
-) -> Tuple[List[TrafficSituation], List[TrafficLightStatus]]:
-    """Get traffic situations and light status near a route."""
-    situations = await fetch_traffic_situations()
-    lights = await fetch_traffic_lights()
+) -> Tuple[List[TrafficSituation], List[TrafficLightStatus], bool]:
+    """
+    Get traffic situations and light status near a route.
+    Returns tuple of (situations, lights, has_data).
+    """
+    situations, sit_available = await fetch_traffic_situations()
+    lights, lights_available = await fetch_traffic_lights()
+
+    has_data = sit_available or lights_available
 
     relevant_situations = []
     relevant_lights = []
@@ -287,4 +338,4 @@ async def get_traffic_near_route(
                     relevant_lights.append(light)
                     break
 
-    return relevant_situations, relevant_lights
+    return relevant_situations, relevant_lights, has_data

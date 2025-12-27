@@ -3,7 +3,8 @@
 ## Prerequisites
 - GitHub account with repository created
 - Railway account (https://railway.app/)
-- Swiss OTD API key (https://api-manager.opentransportdata.swiss/)
+- Swiss OTD API keys (https://api-manager.opentransportdata.swiss/)
+  - You may need separate API keys for each service (OJP, GTFS-RT, SIRI-SX, DATEX II, OCIT-C)
 
 ## Step 1: Create GitHub Repository
 
@@ -29,8 +30,13 @@ git push -u origin main
    - **Builder**: Dockerfile (auto-detected)
 
 5. Add Environment Variables:
-   - `OTD_API_KEY`: Your Swiss OTD API key
+   - `OTD_OJP_API_KEY`: API key for OJP (route planning)
+   - `OTD_GTFSRT_API_KEY`: API key for GTFS-RT (delay data)
+   - `OTD_SIRI_SX_API_KEY`: API key for SIRI-SX (disruptions)
+   - `OTD_TRAFFIC_SITUATIONS_API_KEY`: API key for DATEX II (traffic situations)
+   - `OTD_TRAFFIC_LIGHTS_API_KEY`: API key for OCIT-C (traffic lights)
    - `CORS_ORIGINS`: `*` (or your frontend URL after deployment)
+   - `TIMEZONE`: `Europe/Zurich` (default)
 
 6. Railway will automatically deploy. Note the public URL (e.g., `https://swiss-transport-backend-production.up.railway.app`)
 
@@ -82,8 +88,13 @@ railway up
 ### Backend
 | Variable | Description | Required |
 |----------|-------------|----------|
-| `OTD_API_KEY` | Swiss OTD API key | Yes |
+| `OTD_OJP_API_KEY` | API key for OJP route planning | Yes |
+| `OTD_GTFSRT_API_KEY` | API key for GTFS-RT delay data | Yes |
+| `OTD_SIRI_SX_API_KEY` | API key for SIRI-SX disruptions | Yes |
+| `OTD_TRAFFIC_SITUATIONS_API_KEY` | API key for DATEX II traffic | Optional |
+| `OTD_TRAFFIC_LIGHTS_API_KEY` | API key for OCIT-C traffic lights | Optional |
 | `CORS_ORIGINS` | Allowed origins (comma-separated) | No (default: `*`) |
+| `TIMEZONE` | Server timezone | No (default: `Europe/Zurich`) |
 | `DEBUG` | Enable debug mode | No (default: `false`) |
 
 ### Frontend
@@ -100,8 +111,9 @@ railway up
 ## Troubleshooting
 
 ### Backend not starting
-- Check `OTD_API_KEY` is set
+- Check `OTD_OJP_API_KEY` is set (minimum required)
 - View logs in Railway dashboard
+- Verify PORT is being used correctly (Railway sets it automatically)
 
 ### Frontend can't reach backend
 - Verify `VITE_API_URL` was set during build
@@ -109,5 +121,11 @@ railway up
 - Ensure backend is running and healthy
 
 ### API errors
-- Verify your OTD API key is valid
+- Verify your OTD API keys are valid
 - Check API rate limits (GTFS-RT: 2 requests/min)
+- Check `/health` endpoint for data availability status
+
+### "Live data unavailable" warnings
+- Some features work with reduced functionality when API keys are missing
+- Traffic prediction requires `OTD_TRAFFIC_SITUATIONS_API_KEY` and `OTD_TRAFFIC_LIGHTS_API_KEY`
+- Disruptions require `OTD_SIRI_SX_API_KEY`

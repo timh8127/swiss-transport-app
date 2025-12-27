@@ -161,32 +161,35 @@ async def predict_delay_for_leg(
     # Check if we have route coordinates for traffic lookup
     if route_points:
         try:
-            situations, lights = await get_traffic_near_route(route_points, radius_km=0.3)
+            situations, lights, has_data = await get_traffic_near_route(route_points, radius_km=0.3)
 
-            # Process traffic situations
-            if situations:
-                confidence += CONFIDENCE['with_traffic_data']
-                for sit in situations:
-                    delay_contrib = get_situation_delay(sit.severity)
-                    if delay_contrib > 0:
-                        total_delay += delay_contrib
-                        factors.append(f"Traffic: {sit.description[:50]}...")
+            if not has_data:
+                # Traffic data unavailable - reduce confidence significantly
+                confidence += CONFIDENCE['no_data_penalty']
+                factors.append("Live traffic data unavailable")
+            else:
+                # Process traffic situations
+                if situations:
+                    confidence += CONFIDENCE['with_traffic_data']
+                    for sit in situations:
+                        delay_contrib = get_situation_delay(sit.severity)
+                        if delay_contrib > 0:
+                            total_delay += delay_contrib
+                            factors.append(f"Traffic: {sit.description[:50]}...")
 
-            # Process traffic lights
-            if lights:
-                confidence += CONFIDENCE['with_light_data']
-                for light in lights:
-                    # LOS contribution
-                    los_delay = get_los_delay(light.level_of_service)
-                    if los_delay > 0:
-                        total_delay += los_delay
-                        factors.append(f"Congestion at {light.name or light.intersection_id}")
+                # Process traffic lights
+                if lights:
+                    confidence += CONFIDENCE['with_light_data']
+                    for light in lights:
+                        los_delay = get_los_delay(light.level_of_service)
+                        if los_delay > 0:
+                            total_delay += los_delay
+                            factors.append(f"Congestion at {light.name or light.intersection_id}")
 
-                    # Spillback contribution
-                    spillback_delay = get_spillback_delay(light.spillback_length_meters)
-                    if spillback_delay > 0:
-                        total_delay += spillback_delay
-                        factors.append(f"Queue at {light.name or light.intersection_id}")
+                        spillback_delay = get_spillback_delay(light.spillback_length_meters)
+                        if spillback_delay > 0:
+                            total_delay += spillback_delay
+                            factors.append(f"Queue at {light.name or light.intersection_id}")
 
         except Exception as e:
             logger.warning(f"Error getting traffic data for prediction: {e}")
