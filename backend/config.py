@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     SOAP_TIMEOUT: float = 5.0  # DATEX II SOAP requests
     SSE_HEARTBEAT_INTERVAL: int = 25  # seconds
 
+    # Timeout settings (seconds)
+    HTTP_TIMEOUT: float = 10.0
+    SOAP_TIMEOUT: float = 5.0  # DATEX II SOAP requests
+    SSE_HEARTBEAT_INTERVAL: int = 25  # seconds
+
     # Cache settings (seconds)
     CACHE_TTL_ROUTES: int = 300
     CACHE_TTL_DISRUPTIONS: int = 30
