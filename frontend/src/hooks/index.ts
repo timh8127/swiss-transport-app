@@ -10,7 +10,7 @@ export function useLocationSearch() {
   const [results, setResults] = useState<Location[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const debounceRef = useRef<NodeJS.Timeout>();
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
 
   const search = useCallback(async (searchQuery: string) => {
     if (searchQuery.length < 2) {

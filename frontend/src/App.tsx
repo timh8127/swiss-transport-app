@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { Train, ArrowRightLeft, Search, Loader2, Calendar, Info } from 'lucide-react';
 import { LocationInput, TripCard, DisruptionPanel } from './components';
 import { planTrip } from './api/client';
-import type { Location, Trip, TripSearchResult } from './types';
+import type { Location, TripSearchResult } from './types';
 
 function App() {
   const [origin, setOrigin] = useState<Location | null>(null);
