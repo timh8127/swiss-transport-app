@@ -1,7 +1,7 @@
 // Location search input component
 
 import { useState, useRef, useEffect } from 'react';
-import { MapPin, Search, X, Loader2 } from 'lucide-react';
+import { MapPin, X, Loader2 } from 'lucide-react';
 import type { Location } from '../types';
 import { useLocationSearch } from '../hooks';
 
@@ -13,7 +13,7 @@ interface LocationInputProps {
 }
 
 export function LocationInput({ label, placeholder, value, onChange }: LocationInputProps) {
-  const { query, setQuery, results, loading, clearResults } = useLocationSearch();
+  const { setQuery, results, loading, clearResults } = useLocationSearch();
   const [isOpen, setIsOpen] = useState(false);
   const [inputValue, setInputValue] = useState('');
   const containerRef = useRef<HTMLDivElement>(null);

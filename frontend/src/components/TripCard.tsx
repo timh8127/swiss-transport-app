@@ -2,7 +2,7 @@
 
 import { format } from 'date-fns';
 import {
-  Train, Bus, Tram, Ship, Cable, Footprints,
+  Train, Bus, TrainFront, Ship, Cable, Footprints,
   ChevronDown, ChevronUp, AlertTriangle, Clock,
   TrendingUp, Gauge
 } from 'lucide-react';
@@ -12,7 +12,7 @@ import { useState } from 'react';
 const MODE_ICONS: Record<TransportMode, typeof Train> = {
   rail: Train,
   bus: Bus,
-  tram: Tram,
+  tram: TrainFront,
   metro: Train,
   funicular: Cable,
   ferry: Ship,
@@ -49,7 +49,7 @@ function DelayBadge({ minutes, type }: { minutes: number; type: 'actual' | 'pred
   );
 }
 
-function LegDetail({ leg, index }: { leg: TripLeg; index: number }) {
+function LegDetail({ leg }: { leg: TripLeg }) {
   const Icon = MODE_ICONS[leg.mode];
   const colorClass = MODE_COLORS[leg.mode];
   const [showStops, setShowStops] = useState(false);
@@ -237,8 +237,8 @@ export function TripCard({ trip, isSelected, onSelect }: TripCardProps) {
       {/* Leg details (shown when selected) */}
       {isSelected && (
         <div className="p-4">
-          {trip.legs.map((leg, index) => (
-            <LegDetail key={leg.leg_id} leg={leg} index={index} />
+          {trip.legs.map((leg) => (
+            <LegDetail key={leg.leg_id} leg={leg} />
           ))}
         </div>
       )}
