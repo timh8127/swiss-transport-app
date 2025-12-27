@@ -8,11 +8,11 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     # Separate API Keys for each OTD service
-    OTD_OJP_API_KEY: str = ""
-    OTD_GTFSRT_API_KEY: str = ""
-    OTD_SIRI_SX_API_KEY: str = ""
-    OTD_TRAFFIC_SITUATIONS_API_KEY: str = ""
-    OTD_TRAFFIC_LIGHTS_API_KEY: str = ""
+    OTD_OJP_API_KEY: str = "69708fb246051c58355d5132b10d7f4f"
+    OTD_GTFSRT_API_KEY: str = "fdc8ea2d9863cef9fb60f0620440591c"
+    OTD_SIRI_SX_API_KEY: str = "9b7c2b895d963fcae4d2c432b6beeb10"
+    OTD_TRAFFIC_SITUATIONS_API_KEY: str = "adc8cdc10990e7b552d83ea5559c8428"
+    OTD_TRAFFIC_LIGHTS_API_KEY: str = "c10bdcadba60e5c3fdf7ecbe2a5c65dc"
 
     # API Endpoints
     OJP_ENDPOINT: str = "https://api.opentransportdata.swiss/ojp2020"
